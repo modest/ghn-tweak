@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+
+function die() {
+  echo "$@" >&2
+  exit 1
+}
+
+if [[ -z "$2" ]]; then
+  die "
+USAGE:
+
+  ghn-tweak <host> <password> [<key>[=<value>]]
+
+EXAMPLES:
+
+  List the whole configuration and status:
+  $ ghn-tweak 192.168.0.5 admin
+
+  Get the device's Ethernet MAC address:
+  $ ghn-tweak 192.168.0.5 admin SYSTEM.PRODUCTION.MAC_ADDR
+
+  Enable power-saving on Ethernet inactivity:
+  $ ghn-tweak 192.168.0.5 admin POWERSAVING.GENERAL.MODE=2
+
+TIPS:
+
+  - The default password is 'admin' on most models.
+  - Caution: These configuration values are unsupported and undocumented.
+
+ghn-tweak v0.1
+"
+fi 
+
+tmp="$(mktemp -d)"
+
+function cleanup() {
+  rm -rf "$tmp"
+}
+trap cleanup EXIT SIGINT SIGTERM
+
+host="$1"
+password="$2"
+key="$3"
+value="$4"
+
+if [[ "$host" == "http://"* ]]; then
+  die "Error: When providing the hostname, don't include a scheme prefix (http://) or port."
+fi
+
+if [[ -z "$value" ]] && [[ "$key" == *"="* ]]; then
+  read key value <<<$(IFS="="; echo $key)
+fi
+
+if [[ -n "$key" ]]; then
+  key="$(echo "${key}" | tr '[:lower:]' '[:upper:]')"
+fi
+
+function doCurl() {
+  # $1 = path
+  # $2...n = args
+  path="$1"
+  extra_args_arraystr="$2"
+  IFS=¬; read -r -a extra_args_array <<< "${extra_args_arraystr}"; IFS=
+
+  args_array=()
+  args_array+=(--silent)
+  args_array+=(--connect-timeout 1)
+  args_array+=(--max-time 10)
+  args_array+=(--retry 3)
+  args_array+=(--retry-max-time 15)
+  args_array+=(-H "Accept: text/html,*/*")
+  args_array+=(-H "User-Agent: Mozilla/5.0")
+  args_array+=(-H "Host: ${host}")
+  args_array+=(-H "Origin: http://${host}")
+  args_array+=(-H "Connection: keep-alive")
+  args_array+=(-H "Referer: http://${host}${path}")
+  args_array+=(--cookie-jar "${tmp}/cookies.txt")
+
+  args_array+=("${extra_args_array[@]}")
+
+  curl "${args_array[@]}" "${host}${path}"
+}
+
+function doCurlPost() {
+  # $1 = path
+  # $2...n = key-value pairs in the form of 'name=Bob'
+  path="$1"
+  args_array=()
+  args_array+=(-X POST)
+  args_array+=(-w '%{http_code}')
+  args_array+=(-o /dev/null)
+  args_array+=(-H 'Content-Type: application/x-www-form-urlencoded')
+  for kv in "${@:2}"; do
+    args_array+=(-d "${kv}")
+  done
+  IFS=¬; args_arraystr="${args_array[*]}"; IFS=
+  doCurl "$1" "${args_arraystr}"
+}
+
+function doAuth() {
+  res_code="$(doCurlPost '/password.html' ".CSRFTOKEN=" ".REDIRECT=%2F" ".PASSWORD=${password}")"
+
+  if [[ "$res_code" -lt 200 ]]; then
+    die "Failed to connect to a web server at http://${host}  Is the address correct?"
+  fi
+
+  if [[ "$res_code" != "200" ]]; then
+    die "Authentication failed with HTTP error ${res_code}"
+  fi
+
+  if ! grep plcfw-http-session-id "${tmp}/cookies.txt" >/dev/null 2>/dev/null; then
+    die "Authentication failed. The password probably isn't right. The default password is 'admin' on most models."
+  fi
+}
+
+function getValue() {
+  # $1 = key (optional; omit to get all values)
+
+  if [[ -n "$1" ]]; then
+    key="$1"
+    path="/get.html?${key}"
+  else
+    path="/getall.html"
+  fi
+
+  args_array=()
+  args_array+=(-o "${tmp}/values.html")
+  IFS=¬; args_arraystr="${args_array[*]}"; IFS=
+
+  doCurl "${path}" "${args_arraystr}"
+
+  tr '\n' '¬' < "${tmp}/values.html" | tr -d '\r' | sed -E -e 's/<!--.+-->¬(.*)/\1/' -e 's/¬¬¬/\\n\\n¬/g' -e 's/¬¬/\\n¬/g' -e 's/¬([^¬=]*[^A-Z._0-9=¬][^¬]*)/\\n\1/g' | tr '¬' '\n' > "${tmp}/values.txt"
+
+  if [[ -n "$key" ]]; then
+    value="$(grep -i "^${key}=" "${tmp}/values.txt" | head -n 1 | sed -E -e 's/^[^=]*=(.*)/\1/' -e 's/\\n/¬/g' | tr '¬' '\n')"
+    if [[ -n "$value" ]] && [[ "$value" != "Not found" ]]; then
+      echo "$value"
+    else
+      die "Either the value for '${key}' is null or the key is invalid."
+    fi
+  else 
+    cat "${tmp}/values.txt"
+  fi
+
+  # TODO JSON translation:
+  #sed -E -e 's/"/\\"/g' -e 's/^([^=]+)=NO$/\1=false;/' -e 's/"/\\"/g' -e 's/^([^=]+)=YES$/\1=true;/' -e 's/"/\\"/g' -e 's/^([^=]+)=$/\1=null;/' -e 's/^([^=]+)=(-?[0-9]*\.?[0-9]*)$/\1=\2\;/' -e 's/^([^=]+)=(.*[^;]+)$/\1=\"\2\";/' -e 's/^(.+)[^;]$/\1;/' -e 's/^([^=]+)\.([0-9][^=.]+)/\1["\2"]/' "${tmp}/values.txt" | gron --ungron | jq 'walk(if type=="object" then with_entries(.key|=ascii_downcase) else . end)' > "${tmp}/values.json"
+}
+
+function setValue() {
+  # $1 = key
+  # $2 = value
+  key="$1"
+  value="$2"
+  res_code="$(doCurlPost '/get.html' "CSRFTOKEN=" "REDIRECT=%2Fget.html" "${key}=${value}")"
+  if [[ "$res_code" != "200" ]]; then
+    die "Failed to set value. HTTP error ${res_code}"
+  fi
+}
+
+doAuth
+
+if [[ -n "$key" ]]; then
+  if [[ -n "$value" ]]; then
+    setValue "$key" "$value"
+  else
+    getValue "$key"
+  fi
+else
+  getValue
+fi
