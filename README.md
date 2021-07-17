@@ -104,3 +104,12 @@ No. These are proprietary settings from the MaxLinear firmware. Zero of these ar
 ### If G.hn is an open standard, why rely on a clunky private API?
 
 G.hn can supposedly be managed with LCMP, the Layer 2 Configuration Management Protocol, but open source tooling for this doesn't appear to exist.  While some tools exist for HomePlug/AV2 devices, G.hn hasn't caught up yet.
+
+## Changelog
+
+- v0.2
+  - Added support for sending requests to multiple hosts
+  - Added support for setting multiple parameters at once
+  - Authentication tokens are now cached locally for faster commands
+  - Retrieving individual keys now uses a more efficient API that only reads the requested keys
+- v0.1 - Initial Release
