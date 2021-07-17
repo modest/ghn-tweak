@@ -31,6 +31,9 @@ ghn-tweak v0.1
 "
 fi 
 
+PWD_backup="$PWD"
+DEFAULT_IFS="$IFS"
+
 tmp="$(mktemp -d)"
 cd "${tmp}"
 
@@ -47,36 +50,30 @@ function cleanup() {
 }
 trap cleanup EXIT SIGINT SIGTERM
 
-host="$1"
+hosts="$1"
+host=
 password="$2"
-key="$3"
-value="$4"
+keys="${@:3}"
 
-if [[ "$host" == "http://"* ]]; then
+if [[ "$hosts" == *"://"* ]]; then
   die "Error: When providing the hostname, don't include a scheme prefix (http://) or port."
 fi
 
-if [[ -z "$value" ]] && [[ "$key" == *"="* ]]; then
-  read key value <<<$(IFS="="; echo $key)
-fi
+function doCurlGet() {
+  # httpResultCode=doCurlGet <remote-path> [<output-file> [<string of any additional curl arguments>]]
+  local path="$1"
+  local out="$2"
+  local extra_args_arraystr="$3"
+  IFS=¬; read -r -a extra_args_array <<< "${extra_args_arraystr}"; IFS="$DEFAULT_IFS"
 
-if [[ -n "$key" ]]; then
-  key="$(echo "${key}" | tr '[:lower:]' '[:upper:]')"
-fi
-
-function doCurl() {
-  # $1 = path
-  # $2...n = args
-  path="$1"
-  extra_args_arraystr="$2"
-  IFS=¬; read -r -a extra_args_array <<< "${extra_args_arraystr}"; IFS=
-
-  args_array=()
+  local args_array=()
   args_array+=(--silent)
-  args_array+=(--connect-timeout 1)
+  args_array+=(--connect-timeout 2)
   args_array+=(--max-time 10)
-  args_array+=(--retry 3)
+  args_array+=(--retry 10)
   args_array+=(--retry-max-time 15)
+  args_array+=(--retry-delay 0)
+  args_array+=(--retry-connrefused)
   args_array+=(-H "Accept: text/html,*/*")
   args_array+=(-H "User-Agent: Mozilla/5.0")
   args_array+=(-H "Host: ${host}")
@@ -93,19 +90,15 @@ function doCurl() {
 }
 
 function doCurlPost() {
-  # $1 = path
-  # $2...n = key-value pairs in the form of 'name=Bob'
-  path="$1"
-  args_array=()
+  # httpResultCode=doCurlPost <remote-path> <output-file> [<formkey=formvalue>] [...]
+  local path="$1"
+  local out="$2"
+  local args_array=()
   args_array+=(-X POST)
-  args_array+=(-w '%{http_code}')
-  args_array+=(-o /dev/null)
   args_array+=(-H 'Content-Type: application/x-www-form-urlencoded')
-  for kv in "${@:2}"; do
+  for kv in "${@:3}"; do
     args_array+=(-d "${kv}")
   done
-  IFS=¬; args_arraystr="${args_array[*]}"; IFS=
-  doCurl "$1" "${args_arraystr}"
   IFS=¬; args_arraystr="${args_array[*]}"; IFS="$DEFAULT_IFS"
 
   doCurlGet "$path" "${out}" "${args_arraystr}"
@@ -142,7 +135,7 @@ function doCurlPostWithAuthRetry() {
 }
 
 function doAuth() {
-  res_code="$(doCurlPost '/password.html' ".CSRFTOKEN=" ".REDIRECT=%2F" ".PASSWORD=${password}")"
+  local res_code=$(doCurlPost '/password.html' 'authresult.html' ".CSRFTOKEN=" ".REDIRECT=%2F" ".PASSWORD=${password}")
 
   if [[ "$res_code" -lt 200 ]]; then
     die "Failed to connect to a web server at http://${host}  Is the address correct?"
@@ -153,59 +146,120 @@ function doAuth() {
   fi
 }
 
-  fi
-}
+function getSetKeys() {
+  # getSetKeys keyA keyB keyC
+  # getSetKeys keyA=1 keyB=2 keyC=3
 
-function getValue() {
-  # $1 = key (optional; omit to get all values)
+  local get_keys_list=()
+  local set_kv_pairs=()
+  local kv=
+  local kv_key=
+  local kv_value=
 
-  if [[ -n "$1" ]]; then
-    key="$1"
-    path="/get.html?${key}"
-  else
-    path="/getall.html"
-  fi
-
-  args_array=()
-  args_array+=(-o "${tmp}/values.html")
-  IFS=¬; args_arraystr="${args_array[*]}"; IFS=
-
-  doCurl "${path}" "${args_arraystr}"
-
-  tr '\n' '¬' < "${tmp}/values.html" | tr -d '\r' | sed -E -e 's/<!--.+-->¬(.*)/\1/' -e 's/¬¬¬/\\n\\n¬/g' -e 's/¬¬/\\n¬/g' -e 's/¬([^¬=]*[^A-Z._0-9=¬][^¬]*)/\\n\1/g' | tr '¬' '\n' > "${tmp}/values.txt"
-
-  if [[ -n "$key" ]]; then
-    value="$(grep -i "^${key}=" "${tmp}/values.txt" | head -n 1 | sed -E -e 's/^[^=]*=(.*)/\1/' -e 's/\\n/¬/g' | tr '¬' '\n')"
-    if [[ -n "$value" ]] && [[ "$value" != "Not found" ]]; then
-      echo "$value"
+  for kv in ${@}; do
+    if [[ "$kv" == *"="* ]]; then
+      kv_key="$(echo "${kv%%=*}" | tr '[:lower:]' '[:upper:]')"
+      kv_value="${kv#*=}"
+      get_keys_list+=("${kv_key}")
+      set_kv_pairs+=("${kv_key}=${kv_value}")
     else
-      die "Either the value for '${key}' is null or the key is invalid."
-    fi
-  else 
-    cat "${tmp}/values.txt"
-  fi
+      kv_key="$(echo "${kv}" | tr '[:lower:]' '[:upper:]')"
 
-  # TODO JSON translation:
-  #sed -E -e 's/"/\\"/g' -e 's/^([^=]+)=NO$/\1=false;/' -e 's/"/\\"/g' -e 's/^([^=]+)=YES$/\1=true;/' -e 's/"/\\"/g' -e 's/^([^=]+)=$/\1=null;/' -e 's/^([^=]+)=(-?[0-9]*\.?[0-9]*)$/\1=\2\;/' -e 's/^([^=]+)=(.*[^;]+)$/\1=\"\2\";/' -e 's/^(.+)[^;]$/\1;/' -e 's/^([^=]+)\.([0-9][^=.]+)/\1["\2"]/' "${tmp}/values.txt" | gron --ungron | jq 'walk(if type=="object" then with_entries(.key|=ascii_downcase) else . end)' > "${tmp}/values.json"
+      get_keys_list+=("$kv_key")
+    fi
+  done
+
+  # First, show the current values for all keys provided (read or read/write)
+  if [[ -n "${get_keys_list}" ]]; then
+    getValues "${get_keys_list[@]}"
+  fi
+  if [[ -n "${set_kv_pairs}" ]]; then
+    # Try to set values for all key-value pairs as a batch change first.
+    # This is ideal, especially in cases where incomplete changes may break things.
+    setValues "${set_kv_pairs[@]}"
+
+    # Since batch changes are sometimes inexplicably ignored sometimes, 
+    # redundantly set each key-value manually.
+    for kv in ${set_kv_pairs[@]}; do
+      setValues "$kv"
+    done
+
+    # Read back the new values for all keys
+    echo "-- changed ->" >&2
+    getValues "${get_keys_list[@]}"
+  fi
 }
 
-function setValue() {
-  # $1 = key
-  # $2 = value
-  key="$1"
-  value="$2"
-  res_code="$(doCurlPost '/get.html' "CSRFTOKEN=" "REDIRECT=%2Fget.html" "${key}=${value}")"
+function getValues() {
+  # value_for_key=getValue <key>
+  # all_key_value_pairs=getValue
+  # key_value_pairs=getValue <key> <key> <key>
+
+  specified_key_count=0
+
+  local get_keys=$@
+  local get_key=
+  local path="/getall.html"
+
+  if [[ -n "$get_keys" ]]; then
+    path="/get.html"
+    separator_char="?"
+
+    for get_key in ${get_keys[@]}; do
+      path="${path}${separator_char}${get_key}"
+      separator_char="&"
+      specified_key_count=$((specified_key_count+1))
+    done
+  fi
+
+  local res_code=$(doCurlGetWithAuthRetry "${path}" "values.html")
+  if [[ "$res_code" != "200" ]]; then
+    die "Failed to get values. HTTP error ${res_code}"
+  fi
+
+  cleanHtmlKeyValues "values.html" "values.txt"
+  if [[ ${specified_key_count} == 1 ]]; then
+    printSingleValue "values.txt"
+  else 
+    cat "values.txt"
+  fi
+}
+
+function cleanHtmlKeyValues() {
+  # cleanHtmlKeyValues <infile.html> <outfile.txt>
+  local infile="$1"
+  local outfile="$2"
+  tr '\n' '¬' < "${infile}" | tr -d '\r' | sed -E -e 's/<!--.+-->¬(.*)/\1/' -e 's/=Not found¬/=¬/g' -e 's/¬¬¬/\\n\\n¬/g' -e 's/¬¬/\\n¬/g' -e 's/¬([^¬=]*[^A-Z._0-9=¬][^¬]*)/\\n\1/g' | tr '¬' '\n' | sed -E -e 's/\\n$//' | grep -v "^$" > "${outfile}"
+}
+
+function printSingleValue() {
+  # printSingleValue <values.txt> 
+  local infile="$1"
+  local key="$(head -n 1 "${infile}" | sed -E -e 's/^([^=]*)=.*/\1/')"
+  local value="$(head -n 1 "${infile}" | sed -E -e 's/^[^=]*=(.*)/\1/' -e 's/\\n/¬/g' -e 's/^Not found$//' | tr '¬' '\n')"
+
+  echo -n "${key}=" >&2
+  echo "$value"
+}
+
+function setValues() {
+  # setValue <key>=<value> [...]
+  local res_code=$(doCurlPostWithAuthRetry '/get.html' 'setresult.html' "CSRFTOKEN=" "REDIRECT=%2Fget.html" ${@})
   if [[ "$res_code" != "200" ]]; then
     die "Failed to set value. HTTP error ${res_code}"
   fi
 }
 
-if [[ -n "$key" ]]; then
-  if [[ -n "$value" ]]; then
-    setValue "$key" "$value"
-  else
-    getValue "$key"
+IFS=,; for host in $hosts; do
+  IFS="$DEFAULT_IFS"
+  if [[ "$hosts" == *","* ]]; then
+    echo "" >&2
+    echo "$host:" >&2
+    echo "" >&2
   fi
-else
-  getValue
-fi
+  if [[ -n "$keys" ]]; then
+    getSetKeys ${keys[@]}
+  else
+    getValues
+  fi
+done
