@@ -7,28 +7,48 @@ A simple command line tool for configuring [G.hn](https://en.wikipedia.org/wiki/
 ## Usage
 
 ```
-ghn-tweak <host> <password> [<key>[=<value>]]
+ghn-tweak <host>[,...] <password> [<key>[=value] ...]
+
+ghn-tweak <host> <password>
+ghn-tweak <host> <password> <key>
+ghn-tweak <host> <password> <key>=<value>
+ghn-tweak <host1>,<host2>,<host3> <password> <key1>=<value1> <key2>=<value2> <key3>=<value3>
 ```
 
-**host** is the IP address or hostname of your G.hn device, e.g. `192.168.0.5`
+**host** is the IP address or hostname of your G.hn device(s), e.g. `192.168.0.5`.  Multiple hosts can be provided (comma-separated, no spaces) but must share a password.
 
 **password** is the admin password for the device, e.g. `admin`
 
-**key** refers to the setting name.  If the key is omitted, a list of all settings is dumped.
+**key** refers to the setting name.  If the key is omitted, a list of all settings is dumped.  Multiple keys can be specified (space-separated).
 
-**value** is the new value to save for the setting.  If value is omitted, the current value of the setting is returned.
+**value** is the new value to save for the setting.  If value is omitted, the current value of the setting is returned. Multiple key-value pairs can be specified (space-separated).
 
 ### Examples
 
 ```bash
-# List the whole configuration and status
-ghn-tweak 192.168.0.5 admin
+List the whole configuration and status:
+$ ghn-tweak 192.168.0.5 admin
 
-# Get the device's Ethernet MAC address
-ghn-tweak 192.168.0.5 admin SYSTEM.PRODUCTION.MAC_ADDR
+Get the device's Ethernet MAC address:
+$ ghn-tweak 192.168.0.5 admin SYSTEM.PRODUCTION.MAC_ADDR
 
-# Enable power-saving on Ethernet inactivity
-ghn-tweak 192.168.0.5 admin POWERSAVING.GENERAL.MODE=2
+Enable power-saving on Ethernet inactivity:
+$ ghn-tweak 192.168.0.5 admin POWERSAVING.GENERAL.MODE=2
+
+On 3 powerline adapters, enable DHCP and NTP:
+$ ghn-tweak 10.0.0.2,10.0.0.3,10.0.0.4 admin \
+    DHCP.GENERAL.ENABLED_IPV4=YES \
+    DNS.GENERAL.IPV4_TYPE=DHCPv4 \
+    NTP.GENERAL.ENABLED=YES
+
+On 3 powerline adapters, set a manual pairing key and powerline domain:
+$ ghn-tweak 10.0.0.2,10.0.0.3,10.0.0.4 admin \
+    NODE.GENERAL.DOMAIN_NAME=StrangerThings \
+    PAIRING.GENERAL.PASSWORD=wzy47yhlzltq42t2txuusg6wg \
+    PAIRING.GENERAL.SECURED=YES
+
+Do a hardware reset on 3 powerline adapters:
+$ ghn-tweak 10.0.0.2,10.0.0.3,10.0.0.4 admin SYSTEM.GENERAL.HW_RESET=1
 ```
 
 ### Installation
