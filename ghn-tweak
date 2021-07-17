@@ -32,8 +32,17 @@ ghn-tweak v0.1
 fi 
 
 tmp="$(mktemp -d)"
+cd "${tmp}"
+
+cookie_dir="$HOME/.config/ghn-tweak/tokens"
+
+if [[ ! -d "$cookie_dir" ]]; then
+  mkdir -p "${cookie_dir}" || cookie_dir="."
+  chmod go-rwx "${cookie_dir}" || true 2>/dev/null
+fi
 
 function cleanup() {
+  test -d "${PWD_backup}" && cd "${PWD_backup}" || cd /
   rm -rf "$tmp"
 }
 trap cleanup EXIT SIGINT SIGTERM
@@ -74,7 +83,9 @@ function doCurl() {
   args_array+=(-H "Origin: http://${host}")
   args_array+=(-H "Connection: keep-alive")
   args_array+=(-H "Referer: http://${host}${path}")
-  args_array+=(--cookie-jar "${tmp}/cookies.txt")
+  args_array+=(-o "${out:-/dev/null}")
+  args_array+=(-w '%{http_code}')
+  args_array+=(--cookie-jar "${cookie_dir}/cookies.txt")
 
   args_array+=("${extra_args_array[@]}")
 
@@ -95,6 +106,39 @@ function doCurlPost() {
   done
   IFS=¬; args_arraystr="${args_array[*]}"; IFS=
   doCurl "$1" "${args_arraystr}"
+  IFS=¬; args_arraystr="${args_array[*]}"; IFS="$DEFAULT_IFS"
+
+  doCurlGet "$path" "${out}" "${args_arraystr}"
+}
+
+function doCurlGetWithAuthRetry() {
+  local res_code=$(doCurlGet ${@})
+  if [[ "$res_code" == 403 ]]; then
+    doAuth
+    res_code=$(doCurlGet ${@})
+    if [[ "$res_code" == 403 ]]; then
+      die "Error: Authentication failure. Is the password right?"
+    else
+      echo "${res_code}"
+    fi
+  else
+    echo "${res_code}"
+  fi
+}
+
+function doCurlPostWithAuthRetry() {
+  local res_code=$(doCurlPost ${@})
+  if [[ "$res_code" == 403 ]]; then
+    doAuth
+    res_code=$(doCurlPost ${@})
+    if [[ "$res_code" == 403 ]]; then
+      die "Error: Authentication failure. Is the password right?"
+    else
+      echo "${res_code}"
+    fi
+  else
+    echo "${res_code}"
+  fi
 }
 
 function doAuth() {
@@ -107,9 +151,8 @@ function doAuth() {
   if [[ "$res_code" != "200" ]]; then
     die "Authentication failed with HTTP error ${res_code}"
   fi
+}
 
-  if ! grep plcfw-http-session-id "${tmp}/cookies.txt" >/dev/null 2>/dev/null; then
-    die "Authentication failed. The password probably isn't right. The default password is 'admin' on most models."
   fi
 }
 
@@ -156,8 +199,6 @@ function setValue() {
     die "Failed to set value. HTTP error ${res_code}"
   fi
 }
-
-doAuth
 
 if [[ -n "$key" ]]; then
   if [[ -n "$value" ]]; then
